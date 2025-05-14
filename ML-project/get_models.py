@@ -44,7 +44,7 @@ def get_model(
     model_name: str = "model-GR-noZ-23057-1642540624-0.1.dev963+g309c9d8-LL0.968",
 ):
     # Load pre-trained original t2 model
-    model_path = f"{asnwd}/astronet/t2/models/plasticc/{model_name}"
+    model_path = f"{asnwd}/powerpuffgirls/t2/models/plasticc/{model_name}"
 
     model = tf.keras.models.load_model(
         model_path,
@@ -59,7 +59,7 @@ def get_compressed_model(
     model_name: str = "model-GR-noZ-23057-1642540624-0.1.dev963+g309c9d8-LL0.968",
 ):
     # Load pre-trained zipped original t2 model
-    model_path = f"{asnwd}/astronet/t2/models/plasticc/{model_name}"
+    model_path = f"{asnwd}/powerpuffgirls/t2/models/plasticc/{model_name}"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(f"{model_path}.zip", mode="r") as archive:
@@ -79,7 +79,7 @@ def get_compressed_convert_to_lite(
     model_name: str = "model-GR-noZ-23057-1642540624-0.1.dev963+g309c9d8-LL0.968",
 ):
     # Load pre-trained model
-    model_path = f"{asnwd}/astronet/t2/models/plasticc/{model_name}"
+    model_path = f"{asnwd}/powerpuffgirls/t2/models/plasticc/{model_name}"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(f"{model_path}.zip", mode="r") as archive:
@@ -95,7 +95,7 @@ def get_clustered_model(
     model_name: str = "model-GR-noZ-28341-1654269564-0.5.1.dev73+g70f85f8-LL0.836",
 ):
     # Load pre-trained original t2 model
-    model_path = f"{asnwd}/astronet/tinho/models/plasticc/{model_name}"
+    model_path = f"{asnwd}/powerpuffgirls/tinho/models/plasticc/{model_name}"
 
     model = tf.keras.models.load_model(
         model_path,
@@ -110,7 +110,7 @@ def get_compressed_clustered_model(
     model_name: str = "model-GR-noZ-28341-1654269564-0.5.1.dev73+g70f85f8-LL0.836",
 ):
     # Load pre-trained model
-    model_path = f"{asnwd}/astronet/tinho/models/plasticc/{model_name}"
+    model_path = f"{asnwd}/powerpuffgirls/tinho/models/plasticc/{model_name}"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(f"{model_path}.zip", mode="r") as archive:
@@ -127,13 +127,13 @@ def get_compressed_clustered_model(
 
 
 def get_tflite_from_file(
-    model_path: str = f"{asnwd}/astronet/tinho/models/plasticc/model-GR-noZ-28341-1654269564-0.5.1.dev73+g70f85f8-LL0.836.tflite",
+    model_path: str = f"{asnwd}/powerpuffgirls/tinho/models/plasticc/model-GR-noZ-28341-1654269564-0.5.1.dev73+g70f85f8-LL0.836.tflite",
 ):
     return LiteModel.from_file(model_path=model_path)
 
 
 def get_quantized_tflite_from_file(
-    model_path: str = f"{asnwd}/astronet/tinho/models/plasticc/quantized-model-GR-noZ-28341-1654269564-0.5.1.dev73+g70f85f8-LL0.836.tflite",
+    model_path: str = f"{asnwd}/powerpuffgirls/tinho/models/plasticc/quantized-model-GR-noZ-28341-1654269564-0.5.1.dev73+g70f85f8-LL0.836.tflite",
 ):
     return LiteModel.from_file(model_path=model_path)
 
@@ -146,7 +146,7 @@ def get_pruned_model(
     model_name: str = "model-GR-noZ-9903651-1652692724-0.5.1.dev24+gb7cd783.d20220516-STRIPPED-PRUNED",
 ):
     # Load pre-trained original t2 model
-    model_path = f"{asnwd}/astronet/tinho/models/plasticc/{model_name}"
+    model_path = f"{asnwd}/powerpuffgirls/tinho/models/plasticc/{model_name}"
 
     model = tf.keras.models.load_model(
         model_path,
@@ -161,7 +161,7 @@ def get_compressed_clustered_pruned_model(
     model_name: str = "model-GR-noZ-9903651-1652692724-0.5.1.dev24+gb7cd783.d20220516-STRIPPED-PRUNED",
 ):
     # Load pre-trained model
-    model_path = f"{asnwd}/astronet/tinho/models/plasticc/{model_name}"
+    model_path = f"{asnwd}/powerpuffgirls/tinho/models/plasticc/{model_name}"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(f"{model_path}.zip", mode="r") as archive:

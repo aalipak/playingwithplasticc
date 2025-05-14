@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from astronet.t2.transformer import (
+from powerpuffgirls.t2.transformer import (
     ConvEmbedding,
     PositionalEncoding,
     RelativePositionEmbedding,

@@ -4,10 +4,11 @@ import os
 import shutil
 import sys
 from pathlib import Path
-
+import logging
+import joblib
+import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-import numpy as np
 import seaborn as sns
 import tensorflow as tf
 from numpy import interp
@@ -20,16 +21,82 @@ from sklearn.metrics import (
 )
 from tensorflow import keras
 
-from constants import ASTRONET_WORKING_DIRECTORY as asnwd
-from metrics import WeightedLogLoss
-from utils import (
-    astronet_logger,
-    get_encoding,
-    load_plasticc,
-    load_wisdm_2010,
-    load_wisdm_2019,
-)
+# --- Inlined: CustomFormatter and powerpuffgirls_logger ---
+class CustomFormatter(logging.Formatter):
+    grey = "\x1b[38;20m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+    white = "\x1b[37;20m"
 
+    FORMAT = "[%(asctime)s] "
+    FORMAT += "{%(filename)s:%(lineno)d} "
+    FORMAT += "% (levelname)s "
+    FORMAT += "- %(message)s"
+
+    FORMATS = {
+        logging.DEBUG: grey + FORMAT + reset,
+        logging.INFO: white + FORMAT + reset,
+        logging.WARNING: yellow + FORMAT + reset,
+        logging.ERROR: red + FORMAT + reset,
+        logging.CRITICAL: bold_red + FORMAT + reset,
+    }
+
+    def format(self, record):
+        DATEFORMAT = "%y-%m-%d %H:%M:%S"
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt, datefmt=DATEFORMAT)
+        return formatter.format(record)
+
+def powerpuffgirls_logger(name, level="INFO"):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(CustomFormatter())
+    logger.addHandler(ch)
+    logger.propagate = False
+    return logger
+
+# --- Inlined: WeightedLogLoss ---
+class WeightedLogLoss(keras.losses.Loss):
+    def __init__(self, name="weighted_log_loss"):
+        super().__init__(name=name)
+    def call(self, y_true, y_pred):
+        wtable = np.sum(y_true, axis=0) / y_true.shape[0]
+        yc = tf.clip_by_value(y_pred, 1e-15, 1 - 1e-15)
+        yc = tf.cast(yc, tf.float64)
+        y_true = tf.cast(y_true, tf.float64)
+        wtable = tf.cast(wtable, tf.float64)
+        loss = -(
+            tf.reduce_mean(
+                tf.math.divide_no_nan(
+                    tf.reduce_mean(y_true * tf.math.log(yc), axis=0), wtable
+                )
+            )
+        )
+        return loss
+
+# --- Inlined: get_encoding ---
+def get_encoding(dataset, dataform=None):
+    if dataform is not None:
+        encoding_filename = f"data/{dataform}-{dataset}.encoding"
+    else:
+        encoding_filename = f"data/{dataset}.encoding"
+    with open(encoding_filename, "rb") as eb:
+        encoding = joblib.load(eb)
+    class_encoding = encoding.categories_[0]
+    if dataset == "plasticc":
+        PLASTICC_CLASS_MAPPING = {
+            90: "SNIa", 67: "SNIa-91bg", 52: "SNIax", 42: "SNII", 62: "SNIbc",
+            95: "SLSN-I", 15: "TDE", 64: "KN", 88: "AGN", 92: "RRL", 65: "M-dwarf",
+            16: "EB", 53: "Mira", 6: "$\\mu$-Lens-Single"
+        }
+        class_names = list(np.vectorize(PLASTICC_CLASS_MAPPING.get)(class_encoding))
+    else:
+        class_names = class_encoding
+    return encoding, class_encoding, class_names
 
 def plot_acc_history(architecture, dataset, model_name, event, save=True, ax=None):
     # TODO: Update docstrings
@@ -54,12 +121,12 @@ def plot_acc_history(architecture, dataset, model_name, event, save=True, ax=Non
     if save:
         try:
             os.makedirs(
-                f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}",
+                f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}",
                 exist_ok=True,
             )
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}/model-acc-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}/model-acc-{model_name}.pdf"
         except Exception:
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/model-acc-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/model-acc-{model_name}.pdf"
         plt.savefig(fname, format="pdf")
         plt.clf()
 
@@ -87,12 +154,12 @@ def plot_loss_history(architecture, dataset, model_name, event, save=True, ax=No
     if save:
         try:
             os.makedirs(
-                f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}",
+                f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}",
                 exist_ok=True,
             )
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}/model-loss-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}/model-loss-{model_name}.pdf"
         except Exception:
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/model-loss-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/model-loss-{model_name}.pdf"
         plt.savefig(fname, format="pdf")
         plt.clf()
 
@@ -165,12 +232,12 @@ def plot_confusion_matrix(
     if save:
         try:
             os.makedirs(
-                f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}",
+                f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}",
                 exist_ok=True,
             )
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}/model-cm-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}/model-cm-{model_name}.pdf"
         except Exception:
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/model-cm-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/model-cm-{model_name}.pdf"
         plt.savefig(fname, format="pdf")
         plt.clf()
     else:
@@ -196,7 +263,7 @@ def plot_confusion_matrix_against_baseline(
 
     np.set_printoptions(formatter={"all": lambda x: "{:+}".format(x)})
     # https://stackoverflow.com/a/21132866/4521950
-    baseline = f"{asnwd}/astronet/{architecture}/models/{dataset}/tinho/clustered_stripped_fink_model"
+    baseline = f"{asnwd}/powerpuffgirls/{architecture}/models/{dataset}/tinho/clustered_stripped_fink_model"
 
     baseline_model = keras.models.load_model(
         baseline,
@@ -255,12 +322,12 @@ def plot_confusion_matrix_against_baseline(
     if save:
         try:
             os.makedirs(
-                f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}",
+                f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}",
                 exist_ok=True,
             )
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}/model-cm-{model_name}-CMB.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}/model-cm-{model_name}-CMB.pdf"
         except Exception:
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/model-cm-{model_name}-CMB.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/model-cm-{model_name}-CMB.pdf"
         plt.savefig(fname, format="pdf")
         plt.clf()
     else:
@@ -360,12 +427,12 @@ def plot_multiROC(
     if save:
         try:
             os.makedirs(
-                f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}",
+                f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}",
                 exist_ok=True,
             )
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}/model-roc-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}/model-roc-{model_name}.pdf"
         except Exception:
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/model-roc-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/model-roc-{model_name}.pdf"
         plt.savefig(fname, format="pdf")
         plt.clf()
     else:
@@ -449,12 +516,12 @@ def plot_multiPR(
     if save:
         try:
             os.makedirs(
-                f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}",
+                f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}",
                 exist_ok=True,
             )
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/{model_name}/model-pr-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/{model_name}/model-pr-{model_name}.pdf"
         except Exception:
-            fname = f"{asnwd}/astronet/{architecture}/plots/{dataset}/model-pr-{model_name}.pdf"
+            fname = f"{asnwd}/powerpuffgirls/{architecture}/plots/{dataset}/model-pr-{model_name}.pdf"
         plt.savefig(fname, format="pdf", bbox_inches="tight")
         plt.clf()
     else:
@@ -467,13 +534,13 @@ def plot_multiPR(
 if __name__ == "__main__":
 
     try:
-        log = astronet_logger(__file__)
+        log = powerpuffgirls_logger(__file__)
         log.info("=" * shutil.get_terminal_size((80, 20))[0])
         log.info(f"File Path: {Path(__file__).absolute()}")
         log.info(f"Parent of Directory Path: {Path().absolute().parent}")
     except Exception as e:
         print(f"{e}: Seems you are running from a notebook...")
-        __file__ = f"{Path().resolve().paren.parentt}/astronet/visualise_results.py"
+        __file__ = f"{Path().resolve().paren.parentt}/powerpuffgirls/visualise_results.py"
 
     RANDOM_SEED = 42
     np.random.seed(RANDOM_SEED)
@@ -535,7 +602,7 @@ if __name__ == "__main__":
     print(X_test.shape, y_test.shape)
 
     dataset = args.dataset
-    with open(f"{asnwd}/astronet/{architecture}/models/{dataset}/results.json") as f:
+    with open(f"{asnwd}/powerpuffgirls/{architecture}/models/{dataset}/results.json") as f:
         events = json.load(f)
         if args.model:
             # Get params for model chosen with cli args
@@ -554,7 +621,7 @@ if __name__ == "__main__":
     plot_loss_history(dataset, model_name, event)
 
     model = keras.models.load_model(
-        f"{asnwd}/astronet/{architecture}/models/{dataset}/model-{model_name}"
+        f"{asnwd}/powerpuffgirls/{architecture}/models/{dataset}/model-{model_name}"
     )
     y_pred = model.predict(X_test)
 

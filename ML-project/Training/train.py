@@ -16,10 +16,6 @@ import imageio
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from PIL import Image
-
-from compress import print_sparsity
-from utils import astronet_logger
-import tensorflow as tf
 from sklearn.metrics import precision_score, recall_score
 from tensorflow.keras import optimizers
 from tensorflow.keras.callbacks import (
@@ -29,17 +25,47 @@ from tensorflow.keras.callbacks import (
     ReduceLROnPlateau,
 )
 
-from datasets import (
-    lazy_load_plasticc_noZ,
-    lazy_load_plasticc_wZ,
-)
-from fetch_models import fetch_model
-from metrics import (
-    DistributedWeightedLogLoss,
-    WeightedLogLoss,
-)
-from utils import astronet_logger, find_optimal_batch_size
+# Set up logging
+class CustomFormatter(logging.Formatter):
+    grey = "\x1b[38;20m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+    white = "\x1b[37;20m"
 
+    FORMAT = "[%(asctime)s] "
+    FORMAT += "{%(filename)s:%(lineno)d} "
+    FORMAT += "%(levelname)s "
+    FORMAT += "- %(message)s"
+
+    FORMATS = {
+        logging.DEBUG: grey + FORMAT + reset,
+        logging.INFO: white + FORMAT + reset,
+        logging.WARNING: yellow + FORMAT + reset,
+        logging.ERROR: red + FORMAT + reset,
+        logging.CRITICAL: bold_red + FORMAT + reset,
+    }
+
+    def format(self, record):
+        DATEFORMAT = "%y-%m-%d %H:%M:%S"
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt, datefmt=DATEFORMAT)
+        return formatter.format(record)
+
+def astronet_logger(name):
+    """Create a logger with custom formatting."""
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    
+    # Create console handler with custom formatter
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(CustomFormatter())
+    
+    # Add handler to logger
+    logger.addHandler(ch)
+    return logger
 
 log = astronet_logger(__file__)
 
@@ -51,8 +77,100 @@ RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 tf.random.set_seed(RANDOM_SEED)
 
+def find_optimal_batch_size(training_set_length: int) -> int:
+    """Determine optimal batch size to use. Ideally leave a large remainder such that the GPU is
+    full for most of the time.
+    """
+    if training_set_length < 10000:
+        batch_size_list = [16, 32, 64]
+    else:
+        batch_size_list = [2048, 4096]
+    ratios = []
+    for batch_size in batch_size_list:
+        remainder = training_set_length % batch_size
+        if remainder == 0:
+            batch_size = remainder
+        else:
+            ratios.append(batch_size / remainder)
+
+    index, ratio = min(enumerate(ratios), key=lambda x: abs(x[1] - 1))
+    return batch_size_list[index]
+
+def lazy_load_plasticc_wZ(X, Z, y):
+    """Create a TensorFlow dataset from numpy arrays with redshift information."""
+    def generator():
+        for x, z, L in zip(X, Z, y):
+            yield ({"input_1": x, "input_2": z}, L)
+
+    dataset = tf.data.Dataset.from_generator(
+        generator=generator,
+        output_signature=(
+            {
+                "input_1": tf.type_spec_from_value(X[0]),
+                "input_2": tf.type_spec_from_value(Z[0]),
+            },
+            tf.type_spec_from_value(y[0]),
+        ),
+    )
+    return dataset
+
+def lazy_load_plasticc_noZ(X, y):
+    """Create a TensorFlow dataset from numpy arrays without redshift information."""
+    def generator():
+        for x, L in zip(X, y):
+            yield (x, L)
+
+    dataset = tf.data.Dataset.from_generator(
+        generator=generator,
+        output_signature=(
+            tf.type_spec_from_value(X[0]),
+            tf.type_spec_from_value(y[0]),
+        ),
+    )
+    return dataset
+
+class WeightedLogLoss(tf.keras.losses.Loss):
+    """Weighted log loss for PLAsTiCC dataset."""
+    def __init__(self, name="weighted_log_loss"):
+        super().__init__(name=name)
+
+    def call(self, y_true, y_pred):
+        wtable = np.sum(y_true, axis=0) / y_true.shape[0]
+        yc = tf.clip_by_value(y_pred, 1e-15, 1 - 1e-15)
+        yc = tf.cast(yc, tf.float64)
+        y_true = tf.cast(y_true, tf.float64)
+        wtable = tf.cast(wtable, tf.float64)
+        loss = -(
+            tf.reduce_mean(
+                tf.math.divide_no_nan(
+                    tf.reduce_mean(y_true * tf.math.log(yc), axis=0), wtable
+                )
+            )
+        )
+        return loss
+
+class DistributedWeightedLogLoss(tf.keras.losses.Loss):
+    """Distributed version of weighted log loss for multi-GPU training."""
+    def __init__(self, reduction=tf.keras.losses.Reduction.AUTO, name="weighted_log_loss"):
+        super().__init__(reduction=reduction, name=name)
+
+    def call(self, y_true, y_pred):
+        wtable = np.sum(y_true, axis=0) / y_true.shape[0]
+        yc = tf.clip_by_value(y_pred, 1e-15, 1 - 1e-15)
+        yc = tf.cast(yc, tf.float64)
+        y_true = tf.cast(y_true, tf.float64)
+        wtable = tf.cast(wtable, tf.float64)
+        loss = -(
+            tf.reduce_mean(
+                tf.math.divide_no_nan(
+                    tf.reduce_mean(y_true * tf.math.log(yc), axis=0), wtable
+                )
+            )
+        )
+        return loss
 
 class SGEBreakoutCallback(tf.keras.callbacks.Callback):
+    """Callback to stop training if job runs too long."""
     def __init__(self, threshold=24):
         super(SGEBreakoutCallback, self).__init__()
         self.threshold = threshold
@@ -70,242 +188,25 @@ class SGEBreakoutCallback(tf.keras.callbacks.Callback):
             log.info("Stopping training...")
             self.model.stop_training = True
 
-
-class PrintModelSparsity(tf.keras.callbacks.Callback):
-    def on_epoch_begin(self, epoch, logs={}):
-        sparsity = print_sparsity(self.model)
-        log.info(f"Epoch Start -- Current level of sparsity: {sparsity}")
-
-    def on_epoch_end(self, epoch, logs={}):
-        sparsity = print_sparsity(self.model)
-        log.info(f"Epoch End -- Current level of sparsity: {sparsity}")
-
-
-class TimeHistoryCallback(tf.keras.callbacks.Callback):
-    def on_train_begin(self, logs={}):
-        self.times = []
-
-    def on_epoch_begin(self, epoch, logs={}):
-        self.epoch_time_start = time.time()
-
-    def on_epoch_end(self, epoch, logs={}):
-        self.times.append(time.time() - self.epoch_time_start)
-
-
-class DetectOverfittingCallback(tf.keras.callbacks.Callback):
-    def __init__(self, threshold=0.7):
-        super(DetectOverfittingCallback, self).__init__()
-        self.threshold = threshold
-
-    def on_epoch_end(self, epoch, logs=None):
-        ratio = logs["val_loss"] / logs["loss"]
-        print(
-            f"Epoch: {epoch}, Val/Train loss ratio: {ratio:.2f} -- \n"
-            f"val_loss: {logs['val_loss']}, loss: {logs['loss']}"
-        )
-
-        if ratio > self.threshold:
-            print("Stopping training...")
-            self.model.stop_training = True
-
-
-class VisCallback(tf.keras.callbacks.Callback):
-    def __init__(self, inputs, ground_truth, display_freq=10, n_samples=10):
-        self.inputs = inputs
-        self.ground_truth = ground_truth
-        self.images = []
-        self.display_freq = display_freq
-        self.n_samples = n_samples
-
-    def __display_digits(self, inputs, outputs, ground_truth, epoch, n=10):
-        plt.clf()
-
-        plt.yticks([])
-        plt.grid(None)
-        inputs = np.reshape(inputs, [n, 28, 28])
-        inputs = np.swapaxes(inputs, 0, 1)
-        inputs = np.reshape(inputs, [28, 28 * n])
-        plt.imshow(inputs)
-        plt.xticks([28 * x + 14 for x in range(n)], outputs)
-        for i, t in enumerate(plt.gca().xaxis.get_ticklabels()):
-            if outputs[i] == ground_truth[i]:
-                t.set_color("green")
-            else:
-                t.set_color("red")
-        plt.grid(None)
-
-    def on_epoch_end(self, epoch, logs=None):
-        np.random.seed(RANDOM_SEED)
-        indexes = np.random.choice(len(self.inputs), size=self.n_samples)
-        X_test, y_test = self.inputs[indexes], self.ground_truth[indexes]
-        predictions = np.argmax(self.model.predict(X_test), axis=1)
-
-        self.__display_digits(X_test, predictions, y_test, epoch, n=self.display_freq)
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png")
-        buf.seek(0)
-        image = Image.open(buf)
-        self.images.append(np.array(image))
-
-        if epoch % self.display_freq == 0:
-            plt.show()
-
-    def on_train_end(self, logs=None):
-        GIF_PATH = "./animation.gif"
-        imageio.mimsave(GIF_PATH, self.images, fps=1)
-
-
-# ===================== BEGIN INLINED CONSTANTS =====================
-# Get the project root directory
-PROJECT_ROOT = Path(__file__).absolute().parent
-
-# Set up the working directory
-try:
-    PROJECT_WORKING_DIRECTORY = Path(os.environ['ASNWD'])
-except Exception as e:
-    print(f"Environment variable ASNWD not set: {e}.\nUsing project root directory")
-    PROJECT_WORKING_DIRECTORY = PROJECT_ROOT
-
-asnwd = PROJECT_WORKING_DIRECTORY  # keep existing alias
-DATA_DIR = PROJECT_ROOT / "Data"
-PREPROCESS_DIR = PROJECT_ROOT / "Preprocess"
-TRAINING_DIR = PROJECT_ROOT / "Training"
-EVALUATION_DIR = PROJECT_ROOT / "Evaluation"
-
-# Create directories if they don't exist
-for directory in [DATA_DIR, PREPROCESS_DIR, TRAINING_DIR, EVALUATION_DIR]:
-    directory.mkdir(exist_ok=True)
-
-SYSTEM = platform.system()
-LOCAL_DEBUG = os.environ.get("LOCAL_DEBUG")
-
-# PLASTICC class mappings and weights
-PLASTICC_CLASS_MAPPING = {
-    90: "SNIa", 67: "SNIa-91bg", 52: "SNIax", 42: "SNII", 62: "SNIbc",
-    95: "SLSN-I", 15: "TDE", 64: "KN", 88: "AGN", 92: "RRL", 65: "M-dwarf",
-    16: "EB", 53: "Mira", 6: "$\\mu$-Lens-Single"
-}
-
-PLASTICC_WEIGHTS_DICT = {
-    6: 1 / 18, 15: 1 / 9, 16: 1 / 18, 42: 1 / 18, 52: 1 / 18, 53: 1 / 18,
-    62: 1 / 18, 64: 1 / 9, 65: 1 / 18, 67: 1 / 18, 88: 1 / 18, 90: 1 / 18,
-    92: 1 / 18, 95: 1 / 18, 99: 1 / 19, 1: 1 / 18, 2: 1 / 18, 3: 1 / 18,
-}
-
-# LSST filter definitions
-LSST_FILTER_MAP = {
-    0: "lsstu", 1: "lsstg", 2: "lsstr", 3: "lssti", 4: "lsstz", 5: "lssty"
-}
-
-LSST_PB_WAVELENGTHS = {
-    "lsstu": 3685.0, "lsstg": 4802.0, "lsstr": 6231.0,
-    "lssti": 7542.0, "lsstz": 8690.0, "lssty": 9736.0,
-}
-
-LSST_PB_COLORS = {
-    "lsstu": "#984ea3", "lsstg": "#4daf4a", "lsstr": "#e41a1c",
-    "lssti": "#377eb8", "lsstz": "#ff7f00", "lssty": "#e3c530",
-}
-
-# ZTF filter definitions
-ZTF_FILTER_MAP = {1: "ztfg", 2: "ztfr", 3: "ztfi"}
-
-ZTF_FILTER_MAP_COLORS = {
-    1: "#4daf4a", 2: "#e41a1c", 3: "#377eb8"
-}
-
-ZTF_PB_WAVELENGTHS = {
-    "ztfg": 4804.79, "ztfr": 6436.92, "ztfi": 7968.22
-}
-
-ZTF_PB_COLORS = {
-    "ztfg": "#4daf4a", "ztfr": "#e41a1c", "ztfi": "#377eb8"
-}
-# ===================== END INLINED CONSTANTS =====================
-
-
-
-# Set up logging
-try:
-    log = astronet_logger(__file__)
-    log.info("Running...\n" + "=" * (shutil.get_terminal_size((80, 20))[0]))
-    log.info(f"File Path: {Path(__file__).absolute()}")
-    log.info(f"Working Directory: {asnwd}")
-except Exception as e:
-    print(f"{e}: Seems you are running from a notebook...")
-    log = astronet_logger(str(TRAINING_DIR / "train.py"))
-
-np.set_printoptions(suppress=True, formatter={"float_kind": "{:0.2f}".format})
-
-RANDOM_SEED = 42
-np.random.seed(RANDOM_SEED)
-tf.random.set_seed(RANDOM_SEED)
-os.environ["TF_DETERMINISTIC_OPS"] = "1"
-
-
-warnings.filterwarnings("ignore")
-
-
 class Training(object):
     def __init__(
         self,
-        epochs: int,
-        dataset: str,
-        model: str,
-        redshift: bool,
-        architecture: str,
-        avocado: bool,
-        testset: bool,
-        fink: bool,
+        architecture,
+        dataset,
+        redshift=None,
+        fink=None,
+        avocado=None,
+        testset=None,
     ):
         self.architecture = architecture
-        self.epochs = epochs
         self.dataset = dataset
-        self.model = model
         self.redshift = redshift
+        self.fink = fink
         self.avocado = avocado
         self.testset = testset
-        self.fink = fink
 
     def __call__(self):
-        """Train a given architecture with, or without redshift, on either UGRIZY or GR passbands
-
-        Parameters
-        ----------
-        epochs: int
-            Number of epochs to run training for. If running locally, this should be < 5
-        dataset: str
-            Which dataset to train on; current options: {plasticc, wisdm_2010, wisdm_2019}
-        model: str
-            Model name of the best performing hyperparameters run
-        redshift: bool
-            Include additional information or redshift and redshift_error
-        architecture: str
-            Which architecture to train on; current options: {atx, t2, tinho}
-        avocado: bool
-            Run using augmented data generated from `avocado` pacakge
-        testset: bool
-            Run using homebrewed dataset constructed from PLAsTiCC 'test set'
-        fink: bool
-            Reduce number of bands from UGRIZY --> GR for ZTF like run.
-
-        Examples
-        --------
-        >>> params = {
-            "epochs": 2,
-            "architecture": architecture,
-            "dataset": dataset,
-            "model": hyperrun,
-            "testset": True,
-            "redshift": True,
-            "fink": None,
-            "avocado": None,
-        }
-        >>> training = Training(**params)
-        >>> loss = training.get_wloss
-        """
-
+        """Train a given architecture with, or without redshift, on either UGRIZY or GR passbands"""
         def build_label():
             UNIXTIMESTAMP = int(time.time())
             try:
@@ -315,24 +216,21 @@ class Training(object):
                     .decode()
                 )
             except Exception:
-                from astronet import __version__ as current_version
-
-                VERSION = current_version
+                VERSION = "unknown"
             JOB_ID = os.environ.get("JOB_ID")
             LABEL = f"{UNIXTIMESTAMP}-{JOB_ID}-{VERSION}"
-
             return LABEL
 
         LABEL = build_label()
-        checkpoint_path = asnwd / self.architecture / "models" / self.dataset / "checkpoints" / f"checkpoint-{LABEL}"
-        csv_logger_file = asnwd / "logs" / self.architecture / f"training-{LABEL}.log"
+        checkpoint_path = Path(self.architecture) / "models" / self.dataset / "checkpoints" / f"checkpoint-{LABEL}"
+        csv_logger_file = Path("logs") / self.architecture / f"training-{LABEL}.log"
 
         # Create necessary directories
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         csv_logger_file.parent.mkdir(parents=True, exist_ok=True)
 
         # Lazy load data
-        data_dir = DATA_DIR / "plasticc" / "processed"
+        data_dir = Path("data/plasticc/processed")
         X_train = np.load(data_dir / "X_train.npy", mmap_mode="r")
         Z_train = np.load(data_dir / "Z_train.npy", mmap_mode="r")
         y_train = np.load(data_dir / "y_train.npy", mmap_mode="r")
@@ -341,9 +239,6 @@ class Training(object):
         Z_test = np.load(data_dir / "Z_test.npy", mmap_mode="r")
         y_test = np.load(data_dir / "y_test.npy", mmap_mode="r")
 
-        # >>> train_ds.element_spec[1].shape
-        # TensorShape([14])
-        # num_classes = train_ds.element_spec[1].shape.as_list()[0]
         num_classes = y_train.shape[1]
 
         if self.fink is not None:
@@ -353,11 +248,7 @@ class Training(object):
 
         log.info(f"{X_train.shape, y_train.shape}")
 
-        (
-            num_samples,
-            timesteps,
-            num_features,
-        ) = X_train.shape  # X_train.shape[1:] == (TIMESTEPS, num_features)
+        num_samples, timesteps, num_features = X_train.shape
 
         BATCH_SIZE = find_optimal_batch_size(num_samples)
         log.info(f"BATCH_SIZE:{BATCH_SIZE}")
@@ -368,9 +259,8 @@ class Training(object):
         drop_remainder = False
 
         def get_compiled_model_and_data(loss, drop_remainder):
-
             if self.redshift is not None:
-                hyper_results_file = f"{asnwd}/astronet/{self.architecture}/opt/runs/{self.dataset}/results_with_z.json"
+                hyper_results_file = f"{self.architecture}/opt/runs/{self.dataset}/results_with_z.json"
                 input_shapes = [input_shape, (BATCH_SIZE, Z_train.shape[1])]
 
                 train_ds = (
@@ -386,9 +276,8 @@ class Training(object):
                     .prefetch(tf.data.AUTOTUNE)
                     .cache()
                 )
-
             else:
-                hyper_results_file = f"{asnwd}/astronet/{self.architecture}/opt/runs/{self.dataset}/results.json"
+                hyper_results_file = f"{self.architecture}/opt/runs/{self.dataset}/results.json"
                 input_shapes = input_shape
 
                 train_ds = (
@@ -405,150 +294,92 @@ class Training(object):
                     .cache()
                 )
 
-            model, event = fetch_model(
-                model=self.model,
-                hyper_results_file=hyper_results_file,
-                input_shapes=input_shapes,
-                architecture=self.architecture,
-                num_classes=num_classes,
-            )
+            # Load hyperparameters
+            with open(hyper_results_file, "r") as f:
+                hyper_results = json.load(f)
 
-            # We compile our model with a sampled learning rate and any custom metrics
-            learning_rate = event["lr"]
+            # Get best hyperparameters
+            best_trial = min(hyper_results, key=lambda x: x["value"])
+            hyperparameters = best_trial["hyperparameters"]
+
+            # Build model
+            model = tf.keras.Sequential([
+                tf.keras.layers.Input(shape=input_shapes),
+                tf.keras.layers.LSTM(hyperparameters["units"], return_sequences=True),
+                tf.keras.layers.Dropout(hyperparameters["dropout"]),
+                tf.keras.layers.LSTM(hyperparameters["units"]),
+                tf.keras.layers.Dropout(hyperparameters["dropout"]),
+                tf.keras.layers.Dense(num_classes, activation="softmax")
+            ])
+
+            # Compile model
             model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=hyperparameters["learning_rate"]),
                 loss=loss,
-                optimizer=optimizers.Adam(learning_rate=learning_rate, clipnorm=1),
-                metrics=["acc"],
-                run_eagerly=True,  # Show values when debugging. Also required for use with custom_log_loss
+                metrics=["accuracy"]
             )
 
-            return model, train_ds, test_ds, event, hyper_results_file
+            return model, train_ds, test_ds, best_trial, hyper_results_file
 
-        VALIDATION_BATCH_SIZE = find_optimal_batch_size(X_test.shape[0])
-        log.info(f"VALIDATION_BATCH_SIZE:{VALIDATION_BATCH_SIZE}")
-
+        # Set up distributed training if multiple GPUs available
         if len(tf.config.list_physical_devices("GPU")) > 1:
-            # Create a MirroredStrategy.
             strategy = tf.distribute.MirroredStrategy()
             log.info("Number of devices: {}".format(strategy.num_replicas_in_sync))
             BATCH_SIZE = BATCH_SIZE * strategy.num_replicas_in_sync
-            VALIDATION_BATCH_SIZE = (
-                VALIDATION_BATCH_SIZE * strategy.num_replicas_in_sync
-            )
-            # Open a strategy scope.
+            VALIDATION_BATCH_SIZE = BATCH_SIZE * strategy.num_replicas_in_sync
+
             with strategy.scope():
-                # If you are using a `Loss` class instead, set reduction to `NONE` so that
-                # we can do the reduction afterwards and divide by global batch size.
                 loss = DistributedWeightedLogLoss(
                     reduction=tf.keras.losses.Reduction.AUTO,
-                    # global_batch_size=BATCH_SIZE,
                 )
-
-                # Compute loss that is scaled by global batch size.
-                # loss = tf.reduce_sum(loss_obj()) * (1.0 / BATCH_SIZE)
-
-                # If clustering weights (model compression), build_model. Otherwise, T2Model should produce
-                # original model. TODO: Include flag for choosing between the two, following run with FINK
-                (
-                    model,
-                    train_ds,
-                    test_ds,
-                    event,
-                    hyper_results_file,
-                ) = get_compiled_model_and_data(loss, drop_remainder)
+                model, train_ds, test_ds, event, hyper_results_file = get_compiled_model_and_data(loss, drop_remainder)
         else:
             loss = WeightedLogLoss()
-            (
-                model,
-                train_ds,
-                test_ds,
-                event,
-                hyper_results_file,
-            ) = get_compiled_model_and_data(loss, drop_remainder)
+            model, train_ds, test_ds, event, hyper_results_file = get_compiled_model_and_data(loss, drop_remainder)
 
-        if "pytest" in sys.modules or SYSTEM == "Darwin":
-            NTAKE = 3
+        # Set up callbacks
+        callbacks = [
+            CSVLogger(csv_logger_file),
+            EarlyStopping(
+                monitor="val_loss",
+                patience=10,
+                restore_best_weights=True
+            ),
+            ModelCheckpoint(
+                checkpoint_path,
+                monitor="val_loss",
+                save_best_only=True
+            ),
+            ReduceLROnPlateau(
+                monitor="val_loss",
+                factor=0.5,
+                patience=5,
+                min_lr=1e-6
+            ),
+            SGEBreakoutCallback()
+        ]
 
-            train_ds = train_ds.take(NTAKE)
-            test_ds = test_ds.take(NTAKE)
-
-            ind = np.array([x for x in range(NTAKE * BATCH_SIZE)])
-            y_test = np.take(y_test, ind, axis=0)
-
-        time_callback = TimeHistoryCallback()
-
+        # Train model
         history = model.fit(
             train_ds,
-            batch_size=BATCH_SIZE,
-            epochs=self.epochs,
-            shuffle=True,
             validation_data=test_ds,
-            validation_batch_size=VALIDATION_BATCH_SIZE,
-            verbose=False,
-            callbacks=[
-                time_callback,
-                #                DetectOverfittingCallback(
-                #                    threshold=2
-                #                ),
-                CSVLogger(
-                    csv_logger_file,
-                    separator=",",
-                    append=False,
-                ),
-                EarlyStopping(
-                    min_delta=0.001,
-                    mode="min",
-                    monitor="val_loss",
-                    patience=50,
-                    restore_best_weights=True,
-                    verbose=1,
-                ),
-                ModelCheckpoint(
-                    filepath=checkpoint_path,
-                    mode="min",
-                    monitor="val_loss",
-                    save_best_only=True,
-                ),
-                ReduceLROnPlateau(
-                    cooldown=5,
-                    factor=0.1,
-                    mode="min",
-                    monitor="loss",
-                    patience=5,
-                    verbose=1,
-                ),
-            ],
+            epochs=100,
+            callbacks=callbacks,
+            verbose=1
         )
 
-        model.summary(print_fn=logging.info)
-
-        log.info(f"PER EPOCH TIMING: {time_callback.times}")
-        log.info(f"AVERAGE EPOCH TIMING: {np.array(time_callback.times).mean()}")
-
+        # Evaluate model
         log.info(f"PERCENT OF RAM USED: {psutil.virtual_memory().percent}")
         log.info(f"RAM USED: {psutil.virtual_memory().active / (1024*1024*1024)}")
 
-        #        with tf.device("/cpu:0"):
-        #            try:
-        #                print(f"LL-FULL Model Evaluate: {model.evaluate(test_input, y_test, verbose=0, batch_size=X_test.shape[0])[0]}")
-        #            except Exception:
-        #                print(f"Preventing possible OOM...")
-
-        log.info(
-            f"LL-BATCHED-32 Model Evaluate: {model.evaluate(test_ds, verbose=0)[0]}"
-        )
-        log.info(
-            f"LL-BATCHED-OP Model Evaluate: {model.evaluate(test_ds, verbose=0, batch_size=VALIDATION_BATCH_SIZE)[0]}"
-        )
+        log.info(f"LL-BATCHED-32 Model Evaluate: {model.evaluate(test_ds, verbose=0)[0]}")
+        log.info(f"LL-BATCHED-OP Model Evaluate: {model.evaluate(test_ds, verbose=0, batch_size=VALIDATION_BATCH_SIZE)[0]}")
 
         if drop_remainder:
-            ind = np.array(
-                [x for x in range((y_test.shape[0] // BATCH_SIZE) * BATCH_SIZE)]
-            )
+            ind = np.array([x for x in range((y_test.shape[0] // BATCH_SIZE) * BATCH_SIZE)])
             y_test = np.take(y_test, ind, axis=0)
 
         y_preds = model.predict(test_ds)
-
         log.info(f"{y_preds.shape}, {type(y_preds)}")
 
         WLOSS = loss(y_test, y_preds).numpy()
@@ -556,26 +387,19 @@ class Training(object):
         if "pytest" in sys.modules:
             return WLOSS
 
-        LABEL = (
-            "wZ-" + LABEL if self.redshift else "noZ-" + LABEL
-        )  # Prepend whether redshift was used or not
-        LABEL = (
-            "GR-" + LABEL if self.fink else "UGRIZY-" + LABEL
-        )  # Prepend which filters have been used in training
-        LABEL += f"-LL{WLOSS:.3f}"  # Append loss score
+        # Save model
+        LABEL = "wZ-" + LABEL if self.redshift else "noZ-" + LABEL
+        LABEL = "GR-" + LABEL if self.fink else "UGRIZY-" + LABEL
+        LABEL += f"-LL{WLOSS:.3f}"
 
-        if SYSTEM != "Darwin":
-            model.save(
-                f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/model-{LABEL}"
-            )
-            model.save_weights(
-                f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/weights/weights-{LABEL}"
-            )
+        if platform.system() != "Darwin":
+            model.save(f"{self.architecture}/models/{self.dataset}/model-{LABEL}")
+            model.save_weights(f"{self.architecture}/models/{self.dataset}/weights/weights-{LABEL}")
 
+        # Evaluate on test set
         if X_test.shape[0] < 10000:
-            batch_size = X_test.shape[0]  # Use all samples in test set to evaluate
+            batch_size = X_test.shape[0]
         else:
-            # Otherwise potential OOM Error may occur loading too many into memory at once
             batch_size = (
                 int(VALIDATION_BATCH_SIZE / strategy.num_replicas_in_sync)
                 if len(tf.config.list_physical_devices("GPU")) > 1
@@ -583,32 +407,23 @@ class Training(object):
             )
             log.info(f"EVALUATE VALIDATION_BATCH_SIZE : {batch_size}")
 
+        # Record metrics
         event["hypername"] = event["name"]
         event["name"] = f"{LABEL}"
-
         event["z-redshift"] = self.redshift
         event["avocado"] = self.avocado
         event["testset"] = self.testset
         event["fink"] = self.fink
-
         event["num_classes"] = num_classes
-        event["model_evaluate_on_test_acc"] = model.evaluate(
-            test_ds, verbose=0, batch_size=batch_size
-        )[1]
-        event["model_evaluate_on_test_loss"] = model.evaluate(
-            test_ds, verbose=0, batch_size=batch_size
-        )[0]
+        event["model_evaluate_on_test_acc"] = model.evaluate(test_ds, verbose=0, batch_size=batch_size)[1]
+        event["model_evaluate_on_test_loss"] = model.evaluate(test_ds, verbose=0, batch_size=batch_size)[0]
         event["model_prediction_on_test"] = loss(y_test, y_preds).numpy()
 
         y_test = np.argmax(y_test, axis=1)
         y_preds = np.argmax(y_preds, axis=1)
 
-        event["model_predict_precision_score"] = precision_score(
-            y_test, y_preds, average="macro"
-        )
-        event["model_predict_recall_score"] = recall_score(
-            y_test, y_preds, average="macro"
-        )
+        event["model_predict_precision_score"] = precision_score(y_test, y_preds, average="macro")
+        event["model_predict_recall_score"] = recall_score(y_test, y_preds, average="macro")
 
         print("  Params: ")
         for key, value in history.history.items():
@@ -618,188 +433,24 @@ class Training(object):
         learning_rate = event["lr"]
         del event["lr"]
 
-        if self.redshift is not None:
-            train_results_file = f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/results_with_z.json"
-        else:
-            train_results_file = f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/results.json"
-
-        with open(train_results_file) as jf:
-            data = json.load(jf)
-            # print(data)
-
-            previous_results = data["training_result"]
-            # appending data to optuna_result
-            # print(previous_results)
-            previous_results.append(event)
-            # print(previous_results)
-            # print(data)
-
-        if SYSTEM != "Darwin":
-            with open(train_results_file, "w") as rf:
-                json.dump(data, rf, sort_keys=True, indent=4)
-
-        if len(tf.config.list_physical_devices("GPU")) < 2 and SYSTEM != "Darwin":
-            # PRUNE
-            import tensorflow_model_optimization as tfmot
-
-            # Helper function uses `prune_low_magnitude` to make only the
-            # Dense layers train with pruning.
-            def apply_pruning_to_dense(layer):
-                layer_name = layer.__class__.__name__
-                # prunable_layers = ["ConvEmbedding", "TransformerBlock", "ClusterWeights"]
-                # if layer_name in prunable_layers:
-                if isinstance(layer, tfmot.sparsity.keras.PrunableLayer):
-                    log.info(f"Pruning {layer_name}")
-                    return tfmot.sparsity.keras.prune_low_magnitude(layer)
-                return layer
-
-            # Use `tf.keras.models.clone_model` to apply `apply_pruning_to_dense`
-            # to the layers of the model.
-            model_for_pruning = tf.keras.models.clone_model(
-                model,
-                clone_function=apply_pruning_to_dense,
-            )
-
-            model_for_pruning.summary(print_fn=log.info)
-
-            log_dir = f"{asnwd}/logs/{self.architecture}"
-
-            callbacks = [
-                tfmot.sparsity.keras.UpdatePruningStep(),
-                tfmot.sparsity.keras.PruningSummaries(log_dir=log_dir),
-                PrintModelSparsity(),
-                EarlyStopping(
-                    min_delta=0.001,
-                    mode="min",
-                    monitor="val_loss",
-                    patience=25,
-                    restore_best_weights=True,
-                    verbose=1,
-                ),
-            ]
-
-            model_for_pruning.compile(
-                loss=loss,
-                optimizer=optimizers.Adam(learning_rate=learning_rate, clipnorm=1),
-                metrics=["acc"],
-                run_eagerly=True,  # Show values when debugging. Also required for use with custom_log_loss
-            )
-
-            model_for_pruning.fit(
-                train_ds,
-                callbacks=callbacks,
-                epochs=100,
-            )
-
-            model_for_pruning.save(
-                f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/model-{LABEL}-PRUNED",
-                include_optimizer=True,
-            )
-
-            model_for_export = tfmot.sparsity.keras.strip_pruning(model_for_pruning)
-            model_for_export.save(
-                f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/model-{LABEL}-PRUNED-STRIPPED",
-                include_optimizer=True,
-            )
-
+        return event
 
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser(description="Process named model")
-
-    parser.add_argument(
-        "-a", "--architecture", default="tinho", help="Which architecture to train on"
-    )
-
-    parser.add_argument(
-        "-d",
-        "--dataset",
-        default="wisdm_2010",
-        help="Choose which dataset to use; options include: 'wisdm_2010', 'wisdm_2019'",
-    )
-
-    parser.add_argument(
-        "-e", "--epochs", default=20, help="How many epochs to run training for"
-    )
-
-    parser.add_argument(
-        "-m",
-        "--model",
-        default=None,
-        help="Name of tensorflow.keras model, i.e. model-<timestamp>-<hash>",
-    )
-
-    parser.add_argument(
-        "-z",
-        "--redshift",
-        default=None,
-        help="Whether to include redshift features or not",
-    )
-
-    parser.add_argument(
-        "-A",
-        "--avocado",
-        default=None,
-        help="Train using avocado augmented plasticc data",
-    )
-
-    parser.add_argument(
-        "-t",
-        "--testset",
-        default=None,
-        help="Train using PLAsTiCC test data for representative test",
-    )
-
-    parser.add_argument(
-        "-f",
-        "--fink",
-        default=None,
-        help="Train using PLAsTiCC but only g and r bands for FINK",
-    )
-
-    try:
-        args = parser.parse_args()
-        argsdict = vars(args)
-    except KeyError:
-        parser.print_help()
-        sys.exit(0)
-
-    architecture = args.architecture
-    dataset = args.dataset
-    EPOCHS = int(args.epochs)
-    model = args.model
-
-    avocado = args.avocado
-    if avocado is not None:
-        avocado = True
-
-    testset = args.testset
-    if testset is not None:
-        testset = True
-
-    redshift = args.redshift
-    if redshift is not None:
-        redshift = True
-
-    fink = args.fink
-    if fink is not None:
-        fink = True
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--architecture", type=str, required=True)
+    parser.add_argument("--dataset", type=str, required=True)
+    parser.add_argument("--redshift", action="store_true")
+    parser.add_argument("--fink", action="store_true")
+    parser.add_argument("--avocado", action="store_true")
+    parser.add_argument("--testset", action="store_true")
+    args = parser.parse_args()
 
     training = Training(
-        epochs=EPOCHS,
-        architecture=architecture,
-        dataset=dataset,
-        model=model,
-        redshift=redshift,
-        avocado=avocado,
-        testset=testset,
-        fink=fink,
+        architecture=args.architecture,
+        dataset=args.dataset,
+        redshift=args.redshift,
+        fink=args.fink,
+        avocado=args.avocado,
+        testset=args.testset,
     )
-    if dataset in ["WalkvsRun", "NetFlow"]:
-        # WalkvsRun and NetFlow causes OOM errors on GPU, run on CPU instead
-        with tf.device("/cpu:0"):
-            print(f"{dataset} causes OOM errors on GPU. Running on CPU...")
-            training()
-    else:
-        print("Running on GPU...")
-        training()
+    training()

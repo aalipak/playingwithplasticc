@@ -10,9 +10,9 @@ import tensorflow as tf
 from PIL import Image
 
 from compress import print_sparsity
-from utils import astronet_logger
+from utils import powerpuffgirls_logger
 
-log = astronet_logger(__file__)
+log = powerpuffgirls_logger(__file__)
 
 # Visualization utilities
 plt.rc("font", size=20)

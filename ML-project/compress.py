@@ -97,7 +97,7 @@ class Compress(object):
 
             directory = pathlib.Path(filepath)
 
-            zipped_name = f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/tinho/compressed_{name}.zip"
+            zipped_name = f"{asnwd}/powerpuffgirls/{self.architecture}/models/{self.dataset}/tinho/compressed_{name}.zip"
 
             with zipfile.ZipFile(
                 zipped_name,
@@ -112,7 +112,7 @@ class Compress(object):
 
         def run_predictions_lsst(X_test, Z_test, wloss):
             # ORIGINAL
-            original_model_fp = f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/model-{self.model_name}"
+            original_model_fp = f"{asnwd}/powerpuffgirls/{self.architecture}/models/{self.dataset}/model-{self.model_name}"
             original_model = keras.models.load_model(
                 original_model_fp,
                 custom_objects={"WeightedLogLoss": WeightedLogLoss()},
@@ -126,7 +126,7 @@ class Compress(object):
             )
 
             # CLUSTERED
-            clustered_model_fp = f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/model-9902350-1652645235-0.5.1.dev14+gef9460b"
+            clustered_model_fp = f"{asnwd}/powerpuffgirls/{self.architecture}/models/{self.dataset}/model-9902350-1652645235-0.5.1.dev14+gef9460b"
 
             clustered_model = keras.models.load_model(
                 clustered_model_fp,
@@ -210,7 +210,7 @@ class Compress(object):
             X_test = X_test[:, :, 0:3:2]
 
             # ORIGINAL FINK MODEL
-            original_fink_model_fp = f"{asnwd}/astronet/{self.architecture}/models/{self.dataset}/model-23057-1642540624-0.1.dev963+g309c9d8"
+            original_fink_model_fp = f"{asnwd}/powerpuffgirls/{self.architecture}/models/{self.dataset}/model-23057-1642540624-0.1.dev963+g309c9d8"
             original_fink_model = keras.models.load_model(
                 original_fink_model_fp,
                 custom_objects={"WeightedLogLoss": WeightedLogLoss()},
@@ -231,7 +231,7 @@ class Compress(object):
 
             # CLUSTERED-STRIPPED FINK MODEL
             clustered_fink_model = keras.models.load_model(
-                f"{asnwd}/astronet/{self.architecture}/models/plasticc/model-9903651-1652692724-0.5.1.dev24+gb7cd783.d20220516",
+                f"{asnwd}/powerpuffgirls/{self.architecture}/models/plasticc/model-9903651-1652692724-0.5.1.dev24+gb7cd783.d20220516",
                 custom_objects={"WeightedLogLoss": WeightedLogLoss()},
                 compile=False,
             )
@@ -257,7 +257,7 @@ class Compress(object):
             print(f"LL-Test: {wloss(y_test, y_preds).numpy():.2f}")
 
             # PRUNED FINK MODEL
-            pruned_fink_model_fp = f"{asnwd}/astronet/{self.architecture}/models/plasticc/model-9903651-1652692724-0.5.1.dev24+gb7cd783.d20220516-PRUNED"
+            pruned_fink_model_fp = f"{asnwd}/powerpuffgirls/{self.architecture}/models/plasticc/model-9903651-1652692724-0.5.1.dev24+gb7cd783.d20220516-PRUNED"
             pruned_fink_model = keras.models.load_model(
                 pruned_fink_model_fp,
                 custom_objects={"WeightedLogLoss": WeightedLogLoss()},
@@ -273,7 +273,7 @@ class Compress(object):
             # print(f"LL-Test: {wloss(y_test, y_preds).numpy():.2f}")
 
             # PRUNED-STRIPPED FINK MODEL
-            pruned_stripped_fink_model_fp = f"{asnwd}/astronet/{self.architecture}/models/plasticc/model-9903651-1652692724-0.5.1.dev24+gb7cd783.d20220516-EXPORT"
+            pruned_stripped_fink_model_fp = f"{asnwd}/powerpuffgirls/{self.architecture}/models/plasticc/model-9903651-1652692724-0.5.1.dev24+gb7cd783.d20220516-EXPORT"
             pruned_stripped_fink_model = keras.models.load_model(
                 pruned_stripped_fink_model_fp,
                 custom_objects={"WeightedLogLoss": WeightedLogLoss()},

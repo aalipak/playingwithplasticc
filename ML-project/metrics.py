@@ -6,8 +6,8 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
 
-from astronet.constants import ASTRONET_WORKING_DIRECTORY as asnwd
-from astronet.constants import PLASTICC_WEIGHTS_DICT
+from powerpuffgirls.constants import ASTRONET_WORKING_DIRECTORY as asnwd
+from powerpuffgirls.constants import PLASTICC_WEIGHTS_DICT
 
 # 'SettingWithCopyWarning' in Pandas: https://bit.ly/3mv3fhw
 pd.options.mode.chained_assignment = None  # default='warn'

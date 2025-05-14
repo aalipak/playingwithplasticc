@@ -21,7 +21,7 @@ import tensorflow_model_optimization as tfmot
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from astronet.t2.attention import MultiHeadSelfAttention
+from powerpuffgirls.t2.attention import MultiHeadSelfAttention
 
 
 class ClusterableWeightsCA(tfmot.clustering.keras.ClusteringAlgorithm):

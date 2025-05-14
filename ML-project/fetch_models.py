@@ -4,9 +4,9 @@ from typing import Union
 
 from t2.model import T2Model
 from funcmodel import build_model
-from utils import astronet_logger
+from utils import powerpuffgirls_logger
 
-log = astronet_logger(__file__)
+log = powerpuffgirls_logger(__file__)
 
 
 def fetch_model(

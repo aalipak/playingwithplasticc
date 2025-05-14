@@ -18,15 +18,15 @@ import tensorflow_model_optimization as tfmot
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from astronet.t2.transformer import (
+from powerpuffgirls.t2.transformer import (
     ConvEmbedding,
     PositionalEncoding,
     RelativePositionEmbedding,
     TransformerBlock,
 )
-from astronet.utils import astronet_logger
+from powerpuffgirls.utils import powerpuffgirls_logger
 
-log = astronet_logger(__file__)
+log = powerpuffgirls_logger(__file__)
 
 
 def build_model(

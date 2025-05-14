@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from utils import astronet_logger
+from utils import powerpuffgirls_logger
 
-log = astronet_logger(__file__)
+log = powerpuffgirls_logger(__file__)
 
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)

@@ -111,7 +111,7 @@ def get_clustered_model_to_lite(
 ):
 
     model_path = (
-        f"{asnwd}/astronet/t2/models/plasticc/tinho/clustered_stripped_fink_model"
+        f"{asnwd}/powerpuffgirls/t2/models/plasticc/tinho/clustered_stripped_fink_model"
     )
     c2lmodel = LiteModel.from_saved_model(model_path, tflite_file_path=tflite_file_path)
 
@@ -121,13 +121,13 @@ def get_clustered_model_to_lite(
 def convert_clustered_model_to_lite(model_name, quantized=None):
 
     tflite_file_path = (
-        f"{asnwd}/astronet/tinho/models/plasticc/model-{model_name}.tflite"
+        f"{asnwd}/powerpuffgirls/tinho/models/plasticc/model-{model_name}.tflite"
     )
 
     if quantized is not None:
-        tflite_file_path = f"{asnwd}/astronet/tinho/models/plasticc/quantized-model-{model_name}.tflite"
+        tflite_file_path = f"{asnwd}/powerpuffgirls/tinho/models/plasticc/quantized-model-{model_name}.tflite"
 
-    model_path = f"{asnwd}/astronet/tinho/models/plasticc/model-{model_name}"
+    model_path = f"{asnwd}/powerpuffgirls/tinho/models/plasticc/model-{model_name}"
     c2lmodel = LiteModel.from_saved_model(
         model_path, tflite_file_path=tflite_file_path, quantized=quantized
     )

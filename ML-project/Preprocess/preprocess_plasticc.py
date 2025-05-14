@@ -1,15 +1,6 @@
 import os
 import numpy as np
 import pandas as pd
-from constants import LSST_FILTER_MAP, LSST_PB_WAVELENGTHS
-from preprocess import (
-    __transient_trim,
-    fit_2d_gp,
-    predict_2d_gp,
-    remap_filters,
-    robust_scale
-)
-from utils import train_val_test_split
 from scipy import stats
 from tensorflow.keras.utils import to_categorical
 import matplotlib.pyplot as plt
@@ -18,6 +9,8 @@ import george
 from astropy.table import Table, vstack
 import scipy.optimize as op
 from functools import partial
+from typing import List, Dict, Union
+from sklearn.preprocessing import RobustScaler
 
 # Set figure size
 rcParams['figure.figsize'] = 12, 8
@@ -59,6 +52,147 @@ NEW_CLASS_MAPPING = {
     6: "$\mu$-Lens-Single",
 }
 
+def __transient_trim(object_list: List[str], df: pd.DataFrame) -> (pd.DataFrame, List[np.array]):
+    """Trim off light-curve plateau to leave only the transient part +/- 50 time-steps"""
+    adf = pd.DataFrame(data=[], columns=df.columns)
+    good_object_list = []
+    for obj in object_list:
+        obs = df[df["object_id"] == obj]
+        obs_time = obs["mjd"]
+        obs_detected_time = obs_time[obs["detected"] == 1]
+        if len(obs_detected_time) == 0:
+            print(f"Zero detected points for object:{object_list.index(obj)}")
+            continue
+        is_obs_transient = (obs_time > obs_detected_time.iat[0] - 50) & (
+            obs_time < obs_detected_time.iat[-1] + 50
+        )
+        obs_transient = obs[is_obs_transient]
+        if len(obs_transient["mjd"]) == 0:
+            is_obs_transient = (obs_time > obs_detected_time.iat[0] - 1000) & (
+                obs_time < obs_detected_time.iat[-1] + 1000
+            )
+            obs_transient = obs[is_obs_transient]
+        obs_transient["mjd"] -= min(obs_transient["mjd"])  # so all transients start at time 0
+        good_object_list.append(object_list.index(obj))
+        adf = np.vstack((adf, obs_transient))
+
+    obs_transient = pd.DataFrame(data=adf, columns=obs_transient.columns)
+    filter_indices = good_object_list
+    axis = 0
+    array = np.array(object_list)
+    new_filtered_object_list = np.take(array, filter_indices, axis)
+    return obs_transient, list(new_filtered_object_list)
+
+def fit_2d_gp(obj_data: pd.DataFrame, return_kernel: bool = False, pb_wavelengths: Dict = pb_wavelengths, **kwargs):
+    """Fit a 2D Gaussian process."""
+    guess_length_scale = 20.0  # a parameter of the Matern32Kernel
+
+    obj_times = obj_data.mjd.astype(float)
+    obj_flux = obj_data.flux.astype(float)
+    obj_flux_error = obj_data.flux_error.astype(float)
+    obj_wavelengths = obj_data["filter"].map(pb_wavelengths)
+
+    def neg_log_like(p):  # Objective function: negative log-likelihood
+        gp.set_parameter_vector(p)
+        loglike = gp.log_likelihood(obj_flux, quiet=True)
+        return -loglike if np.isfinite(loglike) else 1e25
+
+    def grad_neg_log_like(p):  # Gradient of the objective function.
+        gp.set_parameter_vector(p)
+        return -gp.grad_log_likelihood(obj_flux, quiet=True)
+
+    # Use the highest signal-to-noise observation to estimate the scale
+    signal_to_noises = np.abs(obj_flux) / np.sqrt(
+        obj_flux_error**2 + (1e-2 * np.max(obj_flux)) ** 2
+    )
+    scale = np.abs(obj_flux[signal_to_noises.idxmax()])
+
+    kernel = (0.5 * scale) ** 2 * george.kernels.Matern32Kernel(
+        [guess_length_scale**2, 6000**2], ndim=2
+    )
+    kernel.freeze_parameter("k2:metric:log_M_1_1")
+
+    gp = george.GP(kernel)
+    default_gp_param = gp.get_parameter_vector()
+    x_data = np.vstack([obj_times, obj_wavelengths]).T
+    gp.compute(x_data, obj_flux_error)
+
+    bounds = [(0, np.log(1000**2))]
+    bounds = [(default_gp_param[0] - 10, default_gp_param[0] + 10)] + bounds
+    results = op.minimize(
+        neg_log_like,
+        gp.get_parameter_vector(),
+        jac=grad_neg_log_like,
+        method="L-BFGS-B",
+        bounds=bounds,
+        tol=1e-6,
+    )
+
+    if results.success:
+        gp.set_parameter_vector(results.x)
+    else:
+        obj = obj_data["object_id"][0]
+        print("GP fit failed for {}! Using guessed GP parameters.".format(obj))
+        gp.set_parameter_vector(default_gp_param)
+
+    gp_predict = partial(gp.predict, obj_flux)
+
+    if return_kernel:
+        return kernel, gp_predict
+    return gp_predict
+
+def predict_2d_gp(gp_predict, gp_times, gp_wavelengths):
+    """Outputs the predictions of a Gaussian Process."""
+    unique_wavelengths = np.unique(gp_wavelengths)
+    number_gp = len(gp_times)
+    obj_gps = []
+    for wavelength in unique_wavelengths:
+        gp_wavelengths = np.ones(number_gp) * wavelength
+        pred_x_data = np.vstack([gp_times, gp_wavelengths]).T
+        pb_pred, pb_pred_var = gp_predict(pred_x_data, return_var=True)
+        obj_gp_pb_array = np.column_stack((gp_times, pb_pred, np.sqrt(pb_pred_var)))
+        obj_gp_pb = Table(
+            [
+                obj_gp_pb_array[:, 0],
+                obj_gp_pb_array[:, 1],
+                obj_gp_pb_array[:, 2],
+                [wavelength] * number_gp,
+            ],
+            names=["mjd", "flux", "flux_error", "filter"],
+        )
+        if len(obj_gps) == 0:  # initialize the table for 1st passband
+            obj_gps = obj_gp_pb
+        else:  # add more entries to the table
+            obj_gps = vstack((obj_gps, obj_gp_pb))
+
+    obj_gps = obj_gps.to_pandas()
+    return obj_gps
+
+def remap_filters(df: pd.DataFrame, filter_map: Dict) -> pd.DataFrame:
+    """Function to remap integer filters to the corresponding filters."""
+    df.rename({"passband": "filter"}, axis="columns", inplace=True)
+    df["filter"].replace(to_replace=filter_map, inplace=True)
+    return df
+
+def robust_scale(dataframe: pd.DataFrame, scale_columns: List[Union[str, int]]) -> pd.DataFrame:
+    """Standardize a dataset along axis=0 (rows)"""
+    scaler = RobustScaler()
+    scaler = scaler.fit(dataframe[scale_columns])
+    dataframe.loc[:, scale_columns] = scaler.transform(
+        dataframe[scale_columns].to_numpy()
+    )
+    return dataframe
+
+def train_val_test_split(df, cols):
+    """Split dataset into train, validation and test set."""
+    features = df[cols]
+    n = len(df)
+    df_train = df[0 : int(n * 0.8)].copy()
+    df_val = df[int(n * 0.8) : int(n * 0.95)].copy()
+    df_test = df[int(n * 0.95) :].copy()
+    num_features = features.shape[1]
+    return df_train, df_val, df_test, num_features
+
 def remap_classes(df, new_mapping):
     """Remap target classes according to the new mapping."""
     # First map to the new class names
@@ -92,14 +226,14 @@ def create_dataset(X, y, time_steps=1, step=1):
 def generate_gp_all_objects(object_list, obs_transient, filters, timesteps=100):
     """Generate GP predictions for all objects."""
     adf = pd.DataFrame(columns=['mjd', 'lsstg', 'lssti', 'lsstr', 'lsstu', 'lssty', 'lsstz', 'object_id'])
-    inverse_pb_wavelengths = {v: k for k, v in LSST_PB_WAVELENGTHS.items()}
+    inverse_pb_wavelengths = {v: k for k, v in pb_wavelengths.items()}
     
     for object_id in object_list:
         df = obs_transient[obs_transient['object_id'] == object_id]
-        gp_predict = fit_2d_gp(df, pb_wavelengths=LSST_PB_WAVELENGTHS)
+        gp_predict = fit_2d_gp(df, pb_wavelengths=pb_wavelengths)
         
         gp_times = np.linspace(min(df['mjd']), max(df['mjd']), timesteps)
-        gp_wavelengths = np.vectorize(LSST_PB_WAVELENGTHS.get)(filters)
+        gp_wavelengths = np.vectorize(pb_wavelengths.get)(filters)
         
         obj_gps = predict_2d_gp(gp_predict, gp_times, gp_wavelengths)
         obj_gps['filter'] = obj_gps['filter'].map(inverse_pb_wavelengths)
